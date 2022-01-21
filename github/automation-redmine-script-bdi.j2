@@ -1,0 +1,156 @@
+{###################################################}
+{# #}
+{% set template = 'Configure Service - IP Transit' %}
+{% set version = '1.1' %}
+{% set date = '07/01/2022' %}
+{% set owner = 'Rusty Despa' %}
+{# #}
+{###################################################}
+{# Set Script Variables #}
+{# Description - Service ID + Account ID + Name + Location #}
+{% set description = '{' + service.metadata.sid | upper + ':' + service.metadata.acc | upper + '} ' + service.metadata.name + ' - ' + service.metadata.loc -%}
+{# ACL Name - Service ID #}
+{% set acl_name = service.metadata.sid | upper -%}
+{# Neighbor Next-Hop - Next Subnet IP #}
+{% set neighbor = service.logical.addresses | ipmath(1) -%}
+{# Subinterface Format - OuterInner with Inner Zero-Padded #}
+{% set subinterface = service.logical.encap.outer | string -%}
+{% if service.logical.encap.inner %}
+{% set subinterface = subinterface + '%04d' % service.logical.encap.inner %}
+{% endif -%}
+{###################################################}
+
+h1. Implementation Plan
+
+{% if '-cr-' in service.physical.device %}
+
+{{ service.physical.device|upper }}:
+
+! Configure logical interface
+<pre>
+interface {{ service.physical.interface }}.{{ subinterface }}
+description {{ description }}
+encapsulation dot1Q {{ service.logical.encap.outer }}{%- if service.logical.encap.inner %} second-dot1q {{ service.logical.encap.inner }}
+{% endif %}
+ip address {{ service.logical.addresses|ipaddr('address') }} {{ service.logical.addresses|ipaddr('netmask') }}
+service-policy input {{ service.logical.in_rate|lower }}-policer
+service-policy output {{ service.logical.out_rate|lower }}-shaper
+bfd interval 300 min_rx 300 multiplier 3
+no bfd echo
+end
+{% endif %}
+
+{% if '-mr-' in service.physical.device %}
+
+{{ service.physical.device|upper }}:
+
+! Configure logical interface
+<pre>
+interface {{ service.physical.interface }}
+service instance {{ subinterface }} ethernet
+description {{ description }}
+encapsulation dot1q {{ service.logical.encap.outer }}
+rewrite ingress tag pop 1 symmetric
+service-policy input {{ service.logical.in_rate|lower }}-policer
+service-policy output {{ service.logical.out_rate|lower }}-shaper
+bridge-domain {{ subinterface }}
+exit
+</pre>
+<pre>
+interface BDI{{ subinterface }}
+description {{ description }}
+ip address {{ service.logical.addresses|ipaddr('address') }} {{ service.logical.addresses|ipaddr('netmask') }}
+bfd interval 300 min_rx 300 multiplier 3
+no bfd echo
+end
+{% endif %}
+</pre>
+
+! Configure Routes
+{% if service.routing.type == 'bgp' %}
+<pre>
+{% for prefix in service.routing.prefixes %}
+ip prefix-list {{ acl_name }} seq {{ loop.index * 5 }} permit {{ prefix }}
+{% endfor %}
+</pre>
+
+! Configure BGP
+<pre>
+router bgp 9336
+address-family ipv4
+neighbor {{ neighbor }} peer-group private-ce-pri
+neighbor {{ neighbor }} description {{ description }}
+neighbor {{ neighbor }} prefix-list {{ acl_name }} in
+{% endif %}
+{%- if service.routing.type == 'static' %}
+<pre>
+{% for prefix in service.routing.prefixes %}
+ip route {{ prefix|ipaddr('network') }} {{ prefix|ipaddr('netmask') }} {{ neighbor }}
+{% endfor %}
+{% endif %}
+</pre>
+
+h1.  Verification Plan
+
+{{ service.physical.device|upper }}
+
+<pre>
+! Confirm ICMP to Gateway Addresses
+ping {{ service.logical.addresses|ipaddr('address') }}
+! Confirm Arp
+{% if '-cr-' in service.physical.device %}
+show ip arp {{ service.physical.interface }}.{{ subinterface }}
+{% endif %}
+{% if '-mr-' in service.physical.device %}
+show ip arp BDI{{ subinterface }}
+{% endif %}
+{% if service.routing.type == 'bgp' %}
+! Verify BGP Neighbor Configuration
+show bgp ipv4 unicast neighbors {{ neighbor }} | i Desc|BGP state|Route map|Prefixes
+show bgp ipv4 unicast neighbors {{ neighbor }} advertised-routes
+show bgp ipv4 unicast neighbors {{ neighbor }} received-routes
+{% endif %}
+{% if service.routing.type == 'static' %}
+! Verify Static Route Installation
+{% for prefix in service.routing.prefixes | unique | ipv4 %}
+show ip route {{ prefix|ipaddr('network') }} {{ prefix|ipaddr('netmask') }}
+{% endfor %}
+{% for prefix in service.routing.prefixes | unique | ipv6 %}
+show ipv6 route {{ prefix|ipaddr('network/prefix') }}
+{% endfor %}
+{% endif %}
+</pre>
+
+h1.  Rollback Plan
+
+! Remove Interface Configurations
+{{ service.physical.device|upper }}
+<pre>
+{% if '-cr-' in service.physical.device %}
+conf t
+no interface {{ service.physical.interface }}.{{ subinterface }}
+{% endif %}
+{% if '-mr-' in service.physical.device %}
+interface {{ service.physical.interface }}
+no service instance {{ subinterface }} ethernet
+no interface BDI{{ subinterface }}
+{% endif %}
+</pre>
+! Remove Routes
+{% if service.routing.type == 'bgp' %}
+<pre>
+{% for prefix in service.routing.prefixes %}
+no ip prefix-list {{ acl_name }} seq {{ loop.index * 5 }} permit {{ prefix }}
+{% endfor %}
+</pre>
+router bgp 9336
+address-family ipv4
+no neighbor {{ neighbor }}
+{% endif %}
+{%- if service.routing.type == 'static' %}
+<pre>
+{% for prefix in service.routing.prefixes %}
+no ip route {{ prefix|ipaddr('network') }} {{ prefix|ipaddr('netmask') }} {{ neighbor }}
+{% endfor %}
+{% endif %}
+</pre>

@@ -1,0 +1,21 @@
+---
+service:
+  metadata:
+    sid: 'S45903'
+    acc: 'A1030176'
+    name: 'Spirit Documentation'
+    loc: 'Ashmore'
+  physical:
+    device: vic-bank-cr-01
+    interface: TenGigabitEthernet0/0/5
+  logical:
+    encap: 
+      outer: 650
+      inner: 100
+    addresses: 10.128.5.189/30
+    in_rate: 200m
+    out_rate: 200m
+  routing:
+    type: bgp
+    prefixes:
+      - 203.0.113.32/30
